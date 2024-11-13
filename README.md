@@ -1,4 +1,6 @@
-Discord WevHook App
+Discord WevHook App for League of Legends
+
+You can track a specific summoner(friends, favorite streamers, pros)
 
 set .env PLAYERT_LIST and DISCORD_WEBHOOK_URL
 
