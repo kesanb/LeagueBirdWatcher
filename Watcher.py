@@ -1,6 +1,6 @@
 import requests
 from discord_webhook import DiscordWebhook
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import time
 import sys
@@ -11,22 +11,33 @@ import logging
 load_dotenv()
 
 # 環境変数から設定を読み込み
-PLAYER_LIST_STR = os.getenv('PLAYER_LIST', '')
 DISCORD_WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL')
 
-# プレイヤーリストの作成
-PLAYER_LIST = [player.strip() for player in PLAYER_LIST_STR.split(',') if player.strip()]
+# 環境変数の読み込み部分
+def load_player_list():
+    player_list_str = os.getenv('PLAYER_LIST', '')
+    player_dict = {}
+    nickname_to_player = {}
+    for player_info in player_list_str.split(','):
+        if ':' in player_info:
+            nickname, name = player_info.strip().split(':')
+            player_dict[name] = nickname
+            nickname_to_player[nickname] = name
+    return player_dict, nickname_to_player
+
+# グローバル変数として定義
+PLAYER_DICT, NICKNAME_TO_PLAYER = load_player_list()
 
 # 環境変数の検証
-if not PLAYER_LIST:
+if not PLAYER_DICT:
     raise ValueError("PLAYER_LIST環境変数が設定されていないか、無効な形式です。")
 
 if not DISCORD_WEBHOOK_URL:
     raise ValueError("DISCORD_WEBHOOK_URL環境変数が設定されていません。")
 
 print("監視対象プレイヤー:")
-for player in PLAYER_LIST:
-    print(f"- {player}")
+for player_name, nickname in PLAYER_DICT.items():
+    print(f"- {nickname} ({player_name})")
 
 # 定数の設定
 POROFESSOR_BASE_URL = "https://porofessor.gg/live/jp/"
@@ -47,20 +58,59 @@ logging.basicConfig(
 logging.info("=== アプリケーション起動 ===")
 logging.info(f"起動時刻: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 logging.info("監視対象プレイヤー:")
-for player in PLAYER_LIST:
-    logging.info(f"- {player}")
+for player_name, nickname in PLAYER_DICT.items():
+    logging.info(f"- {nickname} ({player_name})")
 logging.info("========================")
 
 def check_all_players():
-    for player_name in PLAYER_LIST:
+    match_groups = {}
+    not_found_players = []
+    
+    for player_name in PLAYER_DICT.keys():
         try:
-            logging.info(f"\n{player_name}の状態をチェック中...")
-            check_player_status(player_name)  # player_nameを引数として渡す
+            logging.info(f"\n{PLAYER_DICT[player_name]}({player_name})の状態をチェック中...")
+            result = check_player_status(player_name)
+            
+            if result:
+                if result == "not_found":
+                    not_found_players.append((player_name, PLAYER_DICT[player_name]))
+                else:
+                    match_id = result['match_id']
+                    if match_id not in match_groups:
+                        match_groups[match_id] = []
+                    result['nickname'] = PLAYER_DICT[player_name]
+                    match_groups[match_id].append(result)
+                    
         except Exception as e:
-            logging.error(f"エラーが発生しました（{player_name}）: {str(e)}")
+            logging.error(f"エラーが発生しました（{PLAYER_DICT[player_name]}({player_name})）: {str(e)}")
             continue
     
+    if match_groups or not_found_players:
+        send_discord_notification(match_groups, not_found_players)
+    
     logging.info("\n全プレイヤーのチェックが完了しました。5分後に再度チェックを開始します。")
+
+def send_discord_notification(match_groups, not_found_players):
+    current_time = (datetime.now() + timedelta(hours=9)).strftime('%Y年%m月%d日 %H:%M:%S')
+    message = f"> 🎮 **Match Found!**\n> {current_time}\n\n"
+    
+    # 試合中のプレイヤー情報を追加
+    for match_id, players in match_groups.items():
+        message += f"▼ **試合情報**\n"
+        # ニックネーム:プレイヤー名(チャンピオン名)の形式で表示
+        players_info = " / ".join([f"`{p['nickname']}:{p['player_name']}({p['champion']})`" for p in players])
+        message += f"> プレイヤー：{players_info}\n"
+        message += f"> 試合タイプ：`{players[0]['game_type']}`\n> {players[0]['url']}\n\n"
+    
+    # 存在しないプレイヤーの情報を追加
+    if not_found_players:
+        message += "▼ **存在しないプレイヤー**\n"
+        message += "> 以下のプレイヤー名が見つかりませんでした。名前が間違っている可能性があります：\n"
+        for player_name, nickname in not_found_players:
+            message += f"> `{nickname}:{player_name}`\n"
+    
+    webhook = DiscordWebhook(url=DISCORD_WEBHOOK_URL, content=message)
+    webhook.execute()
 
 def check_player_status(player_name):
     url_player_name = player_name.replace('#', '-')
@@ -105,8 +155,8 @@ def check_player_status(player_name):
         ]
         if any(pattern in content for pattern in not_found_patterns):
             print('判定結果: プレイヤーが存在しません')
-            return
-
+            return "not_found"  # 存在しないプレイヤーの場合の戻り値を変更
+            
         # 試合中の判定
         in_game_patterns = [
             'live-game-stats',
@@ -207,7 +257,7 @@ def check_player_status(player_name):
                 'champion': champion,
                 'game_type': game_type,
                 'url': main_url,
-                'timestamp': datetime.now().timestamp()
+                'timestamp': (datetime.now() + timedelta(hours=9)).timestamp()
             }
             
             # プレイヤーの履歴を管理
@@ -229,14 +279,8 @@ def check_player_status(player_name):
                 last_match_info[player_name].sort(key=lambda x: x['timestamp'], reverse=True)
                 last_match_info[player_name] = last_match_info[player_name][:MAX_MATCHES_PER_PLAYER]
             
-            # 現在の日時を取得
-            current_time = datetime.now().strftime('%Y年%m月%d日 %H:%M:%S')
-            
             logging.info(f'判定結果: 試合中です（{game_type}）- {champion}')
-            message = f"> ***Match Found!***\n> {current_time}\n> プレイヤー：`{player_name}`\n> チャンピオン：`{champion}`\n> 試合タイプ：`{game_type}`\n> マッチID：`{match_id}`\n> {main_url}"
-            webhook = DiscordWebhook(url=DISCORD_WEBHOOK_URL, content=message)
-            webhook.execute()
-            return
+            return current_match  # マッチ情報を返すのみ
 
         # 試合中ではない場合の判定
         not_in_game_patterns = [
@@ -248,7 +292,7 @@ def check_player_status(player_name):
         ]
         if any(pattern in content for pattern in not_in_game_patterns):
             print('判定結果: プレイヤーは試合中ではありません')
-            return
+            return None  # 試合中でい場合はNoneを返す
         else:
             # ゲーム中でない場合の処理
             if player_name in last_match_info:
