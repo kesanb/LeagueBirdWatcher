@@ -13,7 +13,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY Watcher.py .
 
 # アプリケーションを実行
-CMD ["python", "Watcher.py"] ’
+CMD ["python", "Watcher.py"] 
 
 # ヘルスチェックを追加
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
