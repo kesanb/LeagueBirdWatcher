@@ -301,10 +301,10 @@ def main():
         try:
             send_status_notification()# チェック開始前に通知を送信
             check_all_players()  # 全プレイヤーをチェック
-            time.sleep(300)  # 5分（300秒）待機
+            time.sleep(15)  # 5分（300秒）待機
         except Exception as e:
             print(f"予期せぬエラーが発生しました: {str(e)}")
-            time.sleep(300)  # エラー時も5分待機
+            time.sleep(15)  # エラー時も5分待機
             continue
 
 if __name__ == "__main__":
