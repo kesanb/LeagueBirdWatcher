@@ -5,6 +5,7 @@ import os
 import time
 import sys
 from dotenv import load_dotenv
+import logging
 
 # .envファイルの読み込み
 load_dotenv()
@@ -41,6 +42,20 @@ MAX_MATCHES_PER_PLAYER = 2
 # 最後のマッチ情報を保存する辞書
 last_match_info = {}
 
+# ログの設定
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+# 起動時のログ
+logging.info("=== アプリケーション起動 ===")
+logging.info(f"起動時刻: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+logging.info("監視対象プレイヤー:")
+for player in PLAYER_LIST:
+    logging.info(f"- {player}")
+logging.info("========================")
+
 def save_response_to_log(content, status, url):
     # タイムスタンプを含むログファイル名を生成
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -60,13 +75,13 @@ def save_response_to_log(content, status, url):
 def check_all_players():
     for player_name in PLAYER_LIST:
         try:
-            print(f"\n{player_name}の状態をチェック中...")
+            logging.info(f"\n{player_name}の状態をチェック中...")
             check_player_status(player_name)  # player_nameを引数として渡す
         except Exception as e:
-            print(f"エラーが発生しました（{player_name}）: {str(e)}")
+            logging.error(f"エラーが発生しました（{player_name}）: {str(e)}")
             continue
     
-    print("\n全プレイヤーのチェックが完了しました。5分後に再度チェックを開始します。")
+    logging.info("\n全プレイヤーのチェックが完了しました。10分後に再度チェックを開始します。")
 
 def check_player_status(player_name):
     url_player_name = player_name.replace('#', '-')
@@ -83,7 +98,7 @@ def check_player_status(player_name):
     }
     
     try:
-        print(f"検索URL: {main_url}")
+        logging.info(f"検索URL: {main_url}")
         
         session = requests.Session()
         response = session.get(main_url, headers=headers, timeout=10)
@@ -134,7 +149,7 @@ def check_player_status(player_name):
                         match_id = content[start_pos:href_end]
 
             if not match_id:
-                print(f"マッチIDの取得に失敗しました: {player_name}")
+                logging.warning(f"マッチIDの取得に失敗しました: {player_name}")
                 return
                 
             # 試合タイプの判定
@@ -223,13 +238,13 @@ def check_player_status(player_name):
             # 同じマッチがあるかチェック
             for match in last_match_info[player_name]:
                 if match['match_id'] == current_match['match_id']:
-                    print(f"同じマッチをプレイ中のため、通知をスキップします: {player_name} (Match ID: {match_id})")
+                    logging.info(f"同じマッチをプレイ中のため、通知をスキップします: {player_name} (Match ID: {match_id})")
                     return
             
             # 新しいマッチを追加
             last_match_info[player_name].append(current_match)
             
-            # 2マッチを超える場合、最も古いマッチを削除
+            # 2マッチを超え場合、最も古いマッチを削除
             if len(last_match_info[player_name]) > MAX_MATCHES_PER_PLAYER:
                 # タイムスタンプで並び替えて古いものを削除
                 last_match_info[player_name].sort(key=lambda x: x['timestamp'], reverse=True)
@@ -238,7 +253,7 @@ def check_player_status(player_name):
             # 現在の日時を取得
             current_time = datetime.now().strftime('%Y年%m月%d日 %H:%M:%S')
             
-            print(f'判定結果: 試合中です（{game_type}）- {champion}')
+            logging.info(f'判定結果: 試合中です（{game_type}）- {champion}')
             message = f"> ***Match Found!***\n> {current_time}\n> プレイヤー：`{player_name}`\n> チャンピオン：`{champion}`\n> 試合タイプ：`{game_type}`\n> マッチID：`{match_id}`\n> {main_url}"
             webhook = DiscordWebhook(url=DISCORD_WEBHOOK_URL, content=message)
             webhook.execute()
