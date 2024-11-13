@@ -31,11 +31,6 @@ for player in PLAYER_LIST:
 # 定数の設定
 POROFESSOR_BASE_URL = "https://porofessor.gg/live/jp/"
 
-# ログディレクトリの作成
-LOG_DIR = "logs"
-if not os.path.exists(LOG_DIR):
-    os.makedirs(LOG_DIR)
-
 # プレイヤーごとの最大保存マッチ数を2に変更
 MAX_MATCHES_PER_PLAYER = 2
 
@@ -56,22 +51,6 @@ for player in PLAYER_LIST:
     logging.info(f"- {player}")
 logging.info("========================")
 
-def save_response_to_log(content, status, url):
-    # タイムスタンプを含むログファイル名を生成
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_filename = os.path.join(LOG_DIR, f"response_{timestamp}.log")
-    
-    with open(log_filename, "w", encoding="utf-8") as f:
-        f.write(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"URL: {url}\n")
-        f.write(f"Status Code: {status}\n")
-        f.write("=" * 50 + "\n")
-        f.write("Response Content:\n")
-        f.write("=" * 50 + "\n")
-        f.write(content)
-    
-    print(f"レスポンスをログファイルに保存しました: {log_filename}")
-
 def check_all_players():
     for player_name in PLAYER_LIST:
         try:
@@ -81,7 +60,7 @@ def check_all_players():
             logging.error(f"エラーが発生しました（{player_name}）: {str(e)}")
             continue
     
-    logging.info("\n全プレイヤーのチェックが完了しました。10分後に再度チェックを開始します。")
+    logging.info("\n全プレイヤーのチェックが完了しました。5分後に再度チェックを開始します。")
 
 def check_player_status(player_name):
     url_player_name = player_name.replace('#', '-')
@@ -284,27 +263,15 @@ def check_player_status(player_name):
         
     except Exception as error:
         print('エラーが発生しました:', error)
-        save_response_to_log(str(error), "ERROR", main_url)
-
-def send_status_notification():
-    current_time = datetime.now().strftime('%Y年%m月%d日 %H:%M:%S')
-    message = f"> **Watcher Status**\n> {current_time}\n> チェックを開始します。"
-    try:
-        webhook = DiscordWebhook(url=DISCORD_WEBHOOK_URL, content=message)
-        webhook.execute()
-        logging.info("ステータス通知を送信しました")
-    except Exception as e:
-        logging.error(f"ステータス通知の送信に失敗: {str(e)}")
 
 def main():
     while True:
         try:
-            send_status_notification()# チェック開始前に通知を送信
             check_all_players()  # 全プレイヤーをチェック
-            time.sleep(15)  # 5分（300秒）待機
+            time.sleep(300)  # 5分（300秒）待機
         except Exception as e:
             print(f"予期せぬエラーが発生しました: {str(e)}")
-            time.sleep(15)  # エラー時も5分待機
+            time.sleep(300)  # エラー時も5分待機
             continue
 
 if __name__ == "__main__":
