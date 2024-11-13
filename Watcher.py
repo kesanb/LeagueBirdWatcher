@@ -286,9 +286,20 @@ def check_player_status(player_name):
         print('エラーが発生しました:', error)
         save_response_to_log(str(error), "ERROR", main_url)
 
+def send_status_notification():
+    current_time = datetime.now().strftime('%Y年%m月%d日 %H:%M:%S')
+    message = f"> **Watcher Status**\n> {current_time}\n> チェックを開始します。"
+    try:
+        webhook = DiscordWebhook(url=DISCORD_WEBHOOK_URL, content=message)
+        webhook.execute()
+        logging.info("ステータス通知を送信しました")
+    except Exception as e:
+        logging.error(f"ステータス通知の送信に失敗: {str(e)}")
+
 def main():
     while True:
         try:
+            send_status_notification()# チェック開始前に通知を送信
             check_all_players()  # 全プレイヤーをチェック
             time.sleep(300)  # 5分（300秒）待機
         except Exception as e:
