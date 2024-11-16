@@ -7,6 +7,8 @@ import sys
 from dotenv import load_dotenv
 import logging
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+import concurrent.futures
 
 # .envファイルの読み込み
 load_dotenv()
@@ -132,24 +134,32 @@ def check_all_players():
     match_groups = {}
     not_found_players = []
     
-    for player_name in PLAYER_DICT.keys():
-        try:
-            logging.info(f"\n{PLAYER_DICT[player_name]}({player_name})の状態をチェック中...")
-            result = check_player_status(player_name)
-            
-            if result:
-                if result == "not_found":
-                    not_found_players.append((player_name, PLAYER_DICT[player_name]))
-                else:
-                    match_id = result['match_id']
-                    if match_id not in match_groups:
-                        match_groups[match_id] = []
-                    result['nickname'] = PLAYER_DICT[player_name]
-                    match_groups[match_id].append(result)
-                    
-        except Exception as e:
-            logging.error(f"エラーが発生しました（{PLAYER_DICT[player_name]}({player_name})）: {str(e)}")
-            continue
+    # ThreadPoolExecutorを使用して並列処理を実装
+    with ThreadPoolExecutor(max_workers=10) as executor:  # max_workersは同時実行数
+        # 各プレイヤーの処理を並列で実行
+        future_to_player = {
+            executor.submit(check_player_status, player_name): player_name 
+            for player_name in PLAYER_DICT.keys()
+        }
+        
+        # 結果を収集
+        for future in concurrent.futures.as_completed(future_to_player):
+            player_name = future_to_player[future]
+            try:
+                result = future.result()
+                if result:
+                    if result == "not_found":
+                        not_found_players.append((player_name, PLAYER_DICT[player_name]))
+                    else:
+                        match_id = result['match_id']
+                        if match_id not in match_groups:
+                            match_groups[match_id] = []
+                        result['nickname'] = PLAYER_DICT[player_name]
+                        match_groups[match_id].append(result)
+                        
+            except Exception as e:
+                logging.error(f"エラーが発生しました（{PLAYER_DICT[player_name]}({player_name})）: {str(e)}")
+                continue
     
     if match_groups or not_found_players:
         send_discord_notification(match_groups, not_found_players)
