@@ -6,34 +6,72 @@ import time
 import sys
 from dotenv import load_dotenv
 import logging
+from pathlib import Path
 
 # .envファイルの読み込み
 load_dotenv()
 
-# 環境変数から設定を読み込み
-DISCORD_WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL')
+# Discord Webhook URLs for each category
+WEBHOOK_URLS = {
+    'streamer': os.getenv('DISCORD_WEBHOOK_URL_STREAMER'),
+    'friend': os.getenv('DISCORD_WEBHOOK_URL_FRIEND'),
+    'smurf': os.getenv('DISCORD_WEBHOOK_URL_SMURF'),
+    'troll': os.getenv('DISCORD_WEBHOOK_URL_TROLL')
+}
 
 # 環境変数の読み込み部分
 def load_player_list():
-    player_list_str = os.getenv('PLAYER_LIST', '')
+    categories = {
+        'streamer': os.getenv('STREAMER_LIST', ''),
+        'friend': os.getenv('FRIEND_LIST', ''),
+        'smurf': os.getenv('SMURF_LIST', ''),
+        'troll': os.getenv('TROLL_LIST', '')
+    }
+    
     player_dict = {}
     nickname_to_player = {}
-    for player_info in player_list_str.split(','):
-        if ':' in player_info:
-            nickname, name = player_info.strip().split(':')
-            player_dict[name] = nickname
-            nickname_to_player[nickname] = name
-    return player_dict, nickname_to_player
+    player_categories = {}
+    
+    for category, player_list_str in categories.items():
+        if not player_list_str:  # 空文字列の場合はスキップ
+            continue
+            
+        for player_info in player_list_str.split(','):
+            player_info = player_info.strip()
+            if not player_info:  # 空の要素はスキップ
+                continue
+                
+            if ':' in player_info:
+                nickname, name = player_info.split(':')
+                player_dict[name] = nickname
+                nickname_to_player[nickname] = name
+            else:
+                # コロンがない場合は、ニックネームなしとして登録
+                name = player_info
+                player_dict[name] = None
+            
+            player_categories[name] = category
+    
+    return player_dict, nickname_to_player, player_categories
 
 # グローバル変数として定義
-PLAYER_DICT, NICKNAME_TO_PLAYER = load_player_list()
+PLAYER_DICT, NICKNAME_TO_PLAYER, PLAYER_CATEGORIES = load_player_list()
 
 # 環境変数の検証
 if not PLAYER_DICT:
     raise ValueError("PLAYER_LIST環境変数が設定されていないか、無効な形式です。")
 
-if not DISCORD_WEBHOOK_URL:
-    raise ValueError("DISCORD_WEBHOOK_URL環境変数が設定されていません。")
+if not WEBHOOK_URLS['streamer']:
+    raise ValueError("DISCORD_WEBHOOK_URL_STREAMER環境変数が設定されていません。")
+
+if not WEBHOOK_URLS['friend']:
+    raise ValueError("DISCORD_WEBHOOK_URL_FRIEND環境変数が設定されていません。")
+
+if not WEBHOOK_URLS['smurf']:
+    raise ValueError("DISCORD_WEBHOOK_URL_SMURF環境変数が設定されていません。")
+
+if not WEBHOOK_URLS['troll']:
+    raise ValueError("DISCORD_WEBHOOK_URL_TROLL環境変数が設定されていません。")
 
 print("監視対象プレイヤー:")
 for player_name, nickname in PLAYER_DICT.items():
@@ -61,6 +99,34 @@ logging.info("監視対象プレイヤー:")
 for player_name, nickname in PLAYER_DICT.items():
     logging.info(f"- {nickname} ({player_name})")
 logging.info("========================")
+
+# 環境変数の読み込み
+SAVE_HTML_LOG = os.getenv('SAVE_HTML_LOG', 'false').lower() == 'true'
+
+def save_html_log(player_name, content):
+    """HTMLレスポンスをログとして保存する関数"""
+    if not SAVE_HTML_LOG:
+        return
+        
+    # logsディレクトリが存在しない場合は作成
+    log_dir = Path('logs')
+    log_dir.mkdir(exist_ok=True)
+    
+    # プレイヤー名から安全なファイル名を作成
+    safe_name = player_name.replace('#', '-').replace(':', '_')
+    
+    # 現在の日時をファイル名に含める
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f"{safe_name}_{timestamp}.html"
+    
+    # ログファイルを保存
+    log_path = log_dir / filename
+    try:
+        with open(log_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        logging.info(f"HTMLログを保存しました: {filename}")
+    except Exception as e:
+        logging.error(f"HTMLログの保存に失敗しました: {str(e)}")
 
 def check_all_players():
     match_groups = {}
@@ -91,26 +157,42 @@ def check_all_players():
     logging.info("\n全プレイヤーのチェックが完了しました。5分後に再度チェックを開始します。")
 
 def send_discord_notification(match_groups, not_found_players):
+    category_messages = {category: [] for category in WEBHOOK_URLS.keys()}
+    
     current_time = (datetime.now() + timedelta(hours=9)).strftime('%Y年%m月%d日 %H:%M:%S')
-    message = f"> 🎮 **Match Found!**\n> {current_time}\n\n"
     
-    # 試合中のプレイヤー情報を追加
     for match_id, players in match_groups.items():
-        message += f"▼ **試合情報**\n"
-        # ニックネーム:プレイヤー名(チャンピオン名)の形式で表示
-        players_info = " / ".join([f"`{p['nickname']}:{p['player_name']}({p['champion']})`" for p in players])
-        message += f"> プレイヤー：{players_info}\n"
-        message += f"> 試合タイプ：`{players[0]['game_type']}`\n> {players[0]['url']}\n\n"
+        # マッチごとにメッセージを作成
+        match_message = f"> 🎮 **Match Found!**\n> {current_time}\n\n"
+        match_message += f"▼ **試合情報**\n"
+        
+        # カテゴリごとのプレイヤーを分類
+        category_players = {category: [] for category in WEBHOOK_URLS.keys()}
+        game_type = players[0]['game_type']
+        url = players[0]['url']
+        
+        for player in players:
+            category = PLAYER_CATEGORIES.get(player['player_name'], 'friend')
+            if player['nickname']:
+                player_info = f"`{player['nickname']}:{player['player_name']}({player['champion']})`"
+            else:
+                player_info = f"`{player['player_name']}({player['champion']})`"
+            category_players[category].append(player_info)
+        
+        # カテゴリごとにメッセージを作成
+        for category, player_list in category_players.items():
+            if player_list:  # そのカテゴリのプレイヤーが存在する場合
+                category_message = match_message
+                players_info = " / ".join(player_list)
+                category_message += f"> プレイヤー：{players_info}\n"
+                category_message += f"> 試合タイプ：`{game_type}`\n> {url}\n\n"
+                category_messages[category].append(category_message)
     
-    # 存在しないプレイヤーの情報を追加
-    if not_found_players:
-        message += "▼ **存在しないプレイヤー**\n"
-        message += "> 以下のプレイヤー名が見つかりませんでした。名前が間違っている可能性があります：\n"
-        for player_name, nickname in not_found_players:
-            message += f"> `{nickname}:{player_name}`\n"
-    
-    webhook = DiscordWebhook(url=DISCORD_WEBHOOK_URL, content=message)
-    webhook.execute()
+    # カテゴリごとにWebhookを送信
+    for category, messages in category_messages.items():
+        if messages and WEBHOOK_URLS[category]:
+            webhook = DiscordWebhook(url=WEBHOOK_URLS[category], content=''.join(messages))
+            webhook.execute()
 
 def check_player_status(player_name):
     url_player_name = player_name.replace('#', '-')
@@ -131,7 +213,12 @@ def check_player_status(player_name):
         
         session = requests.Session()
         response = session.get(main_url, headers=headers, timeout=10)
-        content = response.text.lower()
+        content = response.text
+        
+        # HTMLログを保存
+        save_html_log(player_name, content)
+        
+        content_lower = content.lower()
         
         # ローディング状態の確認
         loading_patterns = [
@@ -139,13 +226,17 @@ def check_player_status(player_name):
             'loadmessage',
             'spinner'
         ]
-        if any(pattern in content for pattern in loading_patterns):
+        if any(pattern in content_lower for pattern in loading_patterns):
             # APIエンドポイントを直接呼び出す
             api_url = f"https://porofessor.gg/partial/live-partial/jp/{url_player_name}"
             api_response = session.get(api_url, headers=headers, timeout=10)
-            content = api_response.text.lower()
-
-
+            content = api_response.text
+            
+            # APIレスポンスのHTMLログも保存
+            save_html_log(f"{player_name}_api", content)
+            
+            content_lower = content.lower()
+        
         # プレイヤーが存在しない場合の判定
         not_found_patterns = [
             'summoner not found',
@@ -153,7 +244,7 @@ def check_player_status(player_name):
             'summoner-not-found',
             'the summoner does not exist'
         ]
-        if any(pattern in content for pattern in not_found_patterns):
+        if any(pattern in content_lower for pattern in not_found_patterns):
             print('判定結果: プレイヤーが存在しません')
             return "not_found"  # 存在しないプレイヤーの場合の戻り値を変更
             
@@ -165,17 +256,17 @@ def check_player_status(player_name):
             'live game',
             'spectate'
         ]
-        if any(pattern in content for pattern in in_game_patterns):
+        if any(pattern in content_lower for pattern in in_game_patterns):
             # マッチIDの取得
             match_id = None
-            result_td_start = content.find('class="resulttd"')
+            result_td_start = content_lower.find('class="resulttd"')
             if result_td_start != -1:
-                href_start = content.find('href="https://www.leagueofgraphs.com/match/jp/', result_td_start)
+                href_start = content_lower.find('href="https://www.leagueofgraphs.com/match/jp/', result_td_start)
                 if href_start != -1:
-                    href_end = content.find('#', href_start)
+                    href_end = content_lower.find('#', href_start)
                     if href_end != -1:
                         start_pos = href_start + len('href="https://www.leagueofgraphs.com/match/jp/')
-                        match_id = content[start_pos:href_end]
+                        match_id = content_lower[start_pos:href_end]
 
             if not match_id:
                 logging.warning(f"マッチIDの取得に失敗しました: {player_name}")
@@ -185,11 +276,11 @@ def check_player_status(player_name):
             game_type = "不明"
             
             # h2タグの内容を文字列検索で取得
-            h2_start = content.find('<h2 class="left relative">')
+            h2_start = content_lower.find('<h2 class="left relative">')
             if h2_start != -1:
-                h2_end = content.find('</h2>', h2_start)
+                h2_end = content_lower.find('</h2>', h2_start)
                 if h2_end != -1:
-                    game_type_text = content[h2_start:h2_end].split('\n')[1].strip().lower()
+                    game_type_text = content_lower[h2_start:h2_end].split('\n')[1].strip().lower()
                     
                     # 試合タイプのマッピング
                     type_mapping = {
@@ -208,47 +299,47 @@ def check_player_status(player_name):
             search_name = player_name.lower()
             
             # 1. プレイヤーのカードを見つける
-            card_start = content.find(f'<div class="card card-5" data-summonername="{search_name}"')
+            card_start = content_lower.find(f'<div class="card card-5" data-summonername="{search_name}"')
             if card_start == -1:
                 return
             
             # 2. box championboxを探す（小文字で検索）
-            box_start = content.find('<div class="box championbox', card_start)
+            box_start = content_lower.find('<div class="box championbox', card_start)
             if box_start == -1:
-                box_start = content.find('class="championbox', card_start)
+                box_start = content_lower.find('class="championbox', card_start)
                 if box_start == -1:
                     return
             
             # 3. imgFlexを探す（小文字で検索）
-            img_flex_start = content.find('<div class="imgflex', box_start)
+            img_flex_start = content_lower.find('<div class="imgflex', box_start)
             if img_flex_start == -1:
                 return
             
             # 4. imgColumn-championを探す
-            img_column_start = content.find('<div class="imgcolumn-champion', img_flex_start)
+            img_column_start = content_lower.find('<div class="imgcolumn-champion', img_flex_start)
             if img_column_start == -1:
                 return
             
             # 5. relative requireTooltipを探す
-            tooltip_start = content.find('<div class="relative requiretooltip', img_column_start)
+            tooltip_start = content_lower.find('<div class="relative requiretooltip', img_column_start)
             if tooltip_start == -1:
                 return
             
             # 6. tooltipの属性を探す
-            tooltip_class_start = content.find('tooltip="', tooltip_start)
+            tooltip_class_start = content_lower.find('tooltip="', tooltip_start)
             if tooltip_class_start == -1:
                 return
             
             # 7. img srcのalt属性を探す
-            alt_start = content.find('alt="', tooltip_class_start)
+            alt_start = content_lower.find('alt="', tooltip_class_start)
             if alt_start == -1:
                 return
             
-            alt_end = content.find('"', alt_start + 5)
+            alt_end = content_lower.find('"', alt_start + 5)
             if alt_end == -1:
                 return
             
-            champion = content[alt_start + 5:alt_end].capitalize()
+            champion = content_lower[alt_start + 5:alt_end].capitalize()
             
             # 現在のマッチ情報を作成
             current_match = {
@@ -290,9 +381,9 @@ def check_player_status(player_name):
             'please retry later',
             'must be on the loading screen'
         ]
-        if any(pattern in content for pattern in not_in_game_patterns):
+        if any(pattern in content_lower for pattern in not_in_game_patterns):
             print('判定結果: プレイヤーは試合中ではありません')
-            return None  # 試合中でい場合はNoneを返す
+            return None  # 試合中でない場合はNoneを返す
         else:
             # ゲーム中でない場合の処理
             if player_name in last_match_info:
@@ -302,7 +393,7 @@ def check_player_status(player_name):
                     matches.sort(key=lambda x: x['timestamp'], reverse=True)
                     last_match_info[player_name] = matches[:MAX_MATCHES_PER_PLAYER]
         print('レスポンスステータス:', response.status_code)
-        print('レスポンス内容の一部:', content[:500])
+        print('レスポンス内容の一部:', content_lower[:500])
         print('判定結果: 状態を特定できません')
         
     except Exception as error:
