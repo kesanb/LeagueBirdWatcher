@@ -125,7 +125,8 @@ def save_html_log(player_name, content):
     log_path = log_dir / filename
     try:
         with open(log_path, 'w', encoding='utf-8') as f:
-            f.write(content)
+            for chunk in content.split('\n'):
+                f.write(chunk + '\n')
         logging.info(f"HTMLログを保存しました: {filename}")
     except Exception as e:
         logging.error(f"HTMLログの保存に失敗しました: {str(e)}")
@@ -409,14 +410,37 @@ def check_player_status(player_name):
     except Exception as error:
         print('エラーが発生しました:', error)
 
+def cleanup_old_data():
+    """古いデータを定期的に削除（1.5時間以上経過したものを対象）"""
+    current_time = datetime.now().timestamp()
+    cleanup_threshold = 5400  # 1.5時間 = 5400秒
+    
+    for player in list(last_match_info.keys()):
+        matches = last_match_info[player]
+        # 1.5時間以上前のデータを削除
+        last_match_info[player] = [
+            match for match in matches 
+            if current_time - match['timestamp'] < cleanup_threshold
+        ]
+        
+        # データが削除された場合はログに記録
+        removed_count = len(matches) - len(last_match_info[player])
+        if removed_count > 0:
+            logging.info(f"{player}の古いマッチデータ{removed_count}件を削除しました")
+
 def main():
+    cleanup_counter = 0
     while True:
         try:
-            check_all_players()  # 全プレイヤーをチェック
-            time.sleep(300)  # 5分（300秒）待機
+            check_all_players()
+            cleanup_counter += 1
+            if cleanup_counter >= 12:  # 1時間ごとにクリーンアップ
+                cleanup_old_data()
+                cleanup_counter = 0
+            time.sleep(300)
         except Exception as e:
-            print(f"予期せぬエラーが発生しました: {str(e)}")
-            time.sleep(300)  # エラー時も5分待機
+            logging.error(f"予期せぬエラーが発生しました: {str(e)}")
+            time.sleep(300)
             continue
 
 if __name__ == "__main__":
