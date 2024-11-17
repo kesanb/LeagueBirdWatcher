@@ -9,6 +9,9 @@ import logging
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import concurrent.futures
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import gc
 
 # .envファイルの読み込み
 load_dotenv()
@@ -205,6 +208,24 @@ def send_discord_notification(match_groups, not_found_players):
             webhook = DiscordWebhook(url=WEBHOOK_URLS[category], content=''.join(messages))
             webhook.execute()
 
+# グローバルセッションを作成
+class SessionManager:
+    _session = None
+    
+    @classmethod
+    def get_session(cls):
+        if cls._session is None:
+            cls._session = requests.Session()
+            retry_strategy = Retry(
+                total=3,
+                backoff_factor=0.5,
+                status_forcelist=[500, 502, 503, 504]
+            )
+            adapter = HTTPAdapter(max_retries=retry_strategy)
+            cls._session.mount("http://", adapter)
+            cls._session.mount("https://", adapter)
+        return cls._session
+
 def check_player_status(player_name):
     url_player_name = player_name.replace('#', '-')
     main_url = f"https://porofessor.gg/live/jp/{url_player_name}"
@@ -222,14 +243,15 @@ def check_player_status(player_name):
     try:
         logging.info(f"検索URL: {main_url}")
         
-        session = requests.Session()
+        session = SessionManager.get_session()
         response = session.get(main_url, headers=headers, timeout=10)
-        content = response.text
         
-        # HTMLログを保存
-        save_html_log(player_name, content)
+        # コンテンツを直接処理し、変数に保持しない
+        save_html_log(player_name, response.text)
+        content_lower = response.text.lower()
         
-        content_lower = content.lower()
+        # 大きなレスポンスデータの参照を削除
+        response = None
         
         # ローディング状態の確認
         loading_patterns = [
@@ -430,14 +452,22 @@ def cleanup_old_data():
 
 def main():
     cleanup_counter = 0
+    gc_counter = 0
     while True:
         try:
             check_all_players()
-            cleanup_counter += 1
-            if cleanup_counter >= 12:  # 1時間ごとにクリーンアップ
-                cleanup_old_data()
-                cleanup_counter = 0
+            
+            # 1時間半以上経過したにデータをクリーンアップ
+            cleanup_old_data()
+
+            gc_counter += 1
+            # 15分ごとにガベージコレクション実行
+            if gc_counter >= 3:
+                gc.collect()
+                gc_counter = 0
+                
             time.sleep(300)
+            
         except Exception as e:
             logging.error(f"予期せぬエラーが発生しました: {str(e)}")
             time.sleep(300)
