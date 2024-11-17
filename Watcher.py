@@ -109,7 +109,7 @@ logging.info("========================")
 SAVE_HTML_LOG = os.getenv('SAVE_HTML_LOG', 'false').lower() == 'true'
 
 def save_html_log(player_name, content):
-    """HTMLレスポンスをログとして保存する関数"""
+    """HTMLレスポンスをログとして保存する関数（ログ出力なし）"""
     if not SAVE_HTML_LOG:
         return
         
@@ -130,7 +130,6 @@ def save_html_log(player_name, content):
         with open(log_path, 'w', encoding='utf-8') as f:
             for chunk in content.split('\n'):
                 f.write(chunk + '\n')
-        logging.info(f"HTMLログを保存しました: {filename}")
     except Exception as e:
         logging.error(f"HTMLログの保存に失敗しました: {str(e)}")
 
@@ -138,37 +137,37 @@ def check_all_players():
     match_groups = {}
     not_found_players = []
     
-    # ThreadPoolExecutorを使用して並列処理を実装
-    with ThreadPoolExecutor(max_workers=10) as executor:  # max_workersは同時実行数
-        # 各プレイヤーの処理を並列で実行
-        future_to_player = {
-            executor.submit(check_player_status, player_name): player_name 
-            for player_name in PLAYER_DICT.keys()
-        }
+    # プレイヤーを一人ずつ順番にチェック
+    for player_name in PLAYER_DICT.keys():
+        try:
+            result = check_player_status(player_name)
+            
+            if result:
+                if result == "not_found":
+                    not_found_players.append((player_name, PLAYER_DICT[player_name]))
+                    logging.info(f"{PLAYER_DICT[player_name]}({player_name})の試合情報は見つかりませんでした")
+                else:
+                    match_id = result['match_id']
+                    if match_id not in match_groups:
+                        match_groups[match_id] = []
+                    result['nickname'] = PLAYER_DICT[player_name]
+                    match_groups[match_id].append(result)
+                    logging.info(f"{PLAYER_DICT[player_name]}({player_name})の試合が見つかりました: {result['game_type']}")
+                    
+        except Exception as e:
+            logging.error(f"エラーが発生しました（{PLAYER_DICT[player_name]}({player_name})）: {str(e)}")
+            continue
         
-        # 結果を収集
-        for future in concurrent.futures.as_completed(future_to_player):
-            player_name = future_to_player[future]
-            try:
-                result = future.result()
-                if result:
-                    if result == "not_found":
-                        not_found_players.append((player_name, PLAYER_DICT[player_name]))
-                    else:
-                        match_id = result['match_id']
-                        if match_id not in match_groups:
-                            match_groups[match_id] = []
-                        result['nickname'] = PLAYER_DICT[player_name]
-                        match_groups[match_id].append(result)
-                        
-            except Exception as e:
-                logging.error(f"エラーが発生しました（{PLAYER_DICT[player_name]}({player_name})）: {str(e)}")
-                continue
+        # プレイヤーごとに少し待機（サーバー負荷軽減のため）
+        #time.sleep(1)
     
+    # 結果の処理
     if match_groups or not_found_players:
         send_discord_notification(match_groups, not_found_players)
     
-    logging.info("\n全プレイヤーのチェックが完了しました。5分後に再度チェックを開始します。")
+    # 使用済みデータの明示的なクリア
+    match_groups.clear()
+    not_found_players.clear()
 
 def send_discord_notification(match_groups, not_found_players):
     category_messages = {category: [] for category in WEBHOOK_URLS.keys()}
@@ -245,10 +244,10 @@ def check_player_status(player_name):
         
         session = SessionManager.get_session()
         response = session.get(main_url, headers=headers, timeout=10)
+        content = response.text
         
-        # コンテンツを直接処理し、変数に保持しない
-        save_html_log(player_name, response.text)
-        content_lower = response.text.lower()
+        save_html_log(player_name, content)
+        content_lower = content.lower()
         
         # 大きなレスポンスデータの参照を削除
         response = None
@@ -322,7 +321,7 @@ def check_player_status(player_name):
                         'normal (quickplay)': 'NORMAL',
                         'aram': 'ARAM',
                         'arena': 'ARENA',
-                        'custom game': 'CUSTOM'
+                        'arurf 4v4': 'CUSTOM',
                     }
                     
                     game_type = type_mapping.get(game_type_text, "不明")
@@ -451,21 +450,15 @@ def cleanup_old_data():
             logging.info(f"{player}の古いマッチデータ{removed_count}件を削除しました")
 
 def main():
-    cleanup_counter = 0
-    gc_counter = 0
+    logging.info("LoL試合監視を開始します")
+    logging.info("監視対象プレイヤー:")
+    for player_name, nickname in PLAYER_DICT.items():
+        logging.info(f"- {nickname} ({player_name})")
+    
     while True:
         try:
-            check_all_players()
-            
-            # 1時間半以上経過したにデータをクリーンアップ
             cleanup_old_data()
-
-            gc_counter += 1
-            # 15分ごとにガベージコレクション実行
-            if gc_counter >= 3:
-                gc.collect()
-                gc_counter = 0
-                
+            check_all_players()
             time.sleep(300)
             
         except Exception as e:
