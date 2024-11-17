@@ -225,6 +225,9 @@ class SessionManager:
             cls._session.mount("https://", adapter)
         return cls._session
 
+# グローバル変数として追加
+not_found_player_notifications = {}  # {player_name: last_notification_time}
+
 def check_player_status(player_name):
     url_player_name = player_name.replace('#', '-')
     main_url = f"https://porofessor.gg/live/jp/{url_player_name}"
@@ -244,10 +247,47 @@ def check_player_status(player_name):
         
         session = SessionManager.get_session()
         response = session.get(main_url, headers=headers, timeout=10)
-        content = response.text
+        if response is None:
+            category = PLAYER_CATEGORIES.get(player_name, 'friend')
+            webhook = DiscordWebhook(
+                url=WEBHOOK_URLS[category],
+                content=f"⚠️ **エラー**: `{PLAYER_DICT[player_name]}` (`{player_name}`) の情報取得中にエラーが発生しました。\nプレイヤー名が間違っている可能性があります。確認をお願いします。"
+            )
+            webhook.execute()
+            print(f'エラーが発生しました: レスポンスが None です')
+            return "error"
+                
+        content = response.text.lower()
         
         save_html_log(player_name, content)
-        content_lower = content.lower()
+        
+        display_name = PLAYER_DICT[player_name] if PLAYER_DICT[player_name] else player_name
+        
+        # プレイヤーが存在しない場合の判定
+        not_found_patterns = [
+            'Summoner not found',
+            'summoner not found',
+            '404 - page not found',
+            'summoner-not-found',
+            'the summoner does not exist'
+        ]
+        if any(pattern in content for pattern in not_found_patterns):
+            current_time = datetime.now().timestamp()
+            last_notification = not_found_player_notifications.get(player_name, 0)
+            
+            # 3時間（10800秒）経過していれば通知
+            if current_time - last_notification >= 10800:
+                not_found_player_notifications[player_name] = current_time
+                # プレイヤーのカテゴリを取得
+                category = PLAYER_CATEGORIES.get(player_name, 'friend')
+                webhook = DiscordWebhook(
+                    url=WEBHOOK_URLS[category],
+                    content=f"⚠️ **注意**: プレイヤー `{display_name}` が存在しません。プレイヤー名を確認してください。"
+                )
+                webhook.execute()
+            
+            print('判定結果: プレイヤーが存在しません')
+            return "not_found"
         
         # 大きなレスポンスデータの参照を削除
         response = None
@@ -258,7 +298,7 @@ def check_player_status(player_name):
             'loadmessage',
             'spinner'
         ]
-        if any(pattern in content_lower for pattern in loading_patterns):
+        if any(pattern in content for pattern in loading_patterns):
             # APIエンドポイントを直接呼び出す
             api_url = f"https://porofessor.gg/partial/live-partial/jp/{url_player_name}"
             api_response = session.get(api_url, headers=headers, timeout=10)
@@ -267,19 +307,8 @@ def check_player_status(player_name):
             # APIレスポンスのHTMLログも保存
             save_html_log(f"{player_name}_api", content)
             
-            content_lower = content.lower()
+            content = content.lower()
         
-        # プレイヤーが存在しない場合の判定
-        not_found_patterns = [
-            'summoner not found',
-            '404 - page not found',
-            'summoner-not-found',
-            'the summoner does not exist'
-        ]
-        if any(pattern in content_lower for pattern in not_found_patterns):
-            print('判定結果: プレイヤーが存在しません')
-            return "not_found"  # 存在しないプレイヤーの場合の戻り値を変更
-            
         # 試合中の判定
         in_game_patterns = [
             'live-game-stats',
@@ -288,17 +317,17 @@ def check_player_status(player_name):
             'live game',
             'spectate'
         ]
-        if any(pattern in content_lower for pattern in in_game_patterns):
+        if any(pattern in content for pattern in in_game_patterns):
             # マッチIDの取得
             match_id = None
-            result_td_start = content_lower.find('class="resulttd"')
+            result_td_start = content.find('class="resulttd"')
             if result_td_start != -1:
-                href_start = content_lower.find('href="https://www.leagueofgraphs.com/match/jp/', result_td_start)
+                href_start = content.find('href="https://www.leagueofgraphs.com/match/jp/', result_td_start)
                 if href_start != -1:
-                    href_end = content_lower.find('#', href_start)
+                    href_end = content.find('#', href_start)
                     if href_end != -1:
                         start_pos = href_start + len('href="https://www.leagueofgraphs.com/match/jp/')
-                        match_id = content_lower[start_pos:href_end]
+                        match_id = content[start_pos:href_end]
 
             if not match_id:
                 logging.warning(f"マッチIDの取得に失敗しました: {player_name}")
@@ -308,11 +337,11 @@ def check_player_status(player_name):
             game_type = "不明"
             
             # h2タグの内容を文字列検索で取得
-            h2_start = content_lower.find('<h2 class="left relative">')
+            h2_start = content.find('<h2 class="left relative">')
             if h2_start != -1:
-                h2_end = content_lower.find('</h2>', h2_start)
+                h2_end = content.find('</h2>', h2_start)
                 if h2_end != -1:
-                    game_type_text = content_lower[h2_start:h2_end].split('\n')[1].strip().lower()
+                    game_type_text = content[h2_start:h2_end].split('\n')[1].strip().lower()
                     
                     # 試合タイプのマッピング
                     type_mapping = {
@@ -331,47 +360,47 @@ def check_player_status(player_name):
             search_name = player_name.lower()
             
             # 1. プレイヤーのカードを見つける
-            card_start = content_lower.find(f'<div class="card card-5" data-summonername="{search_name}"')
+            card_start = content.find(f'<div class="card card-5" data-summonername="{search_name}"')
             if card_start == -1:
                 return
             
             # 2. box championboxを探す（小文字で検索）
-            box_start = content_lower.find('<div class="box championbox', card_start)
+            box_start = content.find('<div class="box championbox', card_start)
             if box_start == -1:
-                box_start = content_lower.find('class="championbox', card_start)
+                box_start = content.find('class="championbox', card_start)
                 if box_start == -1:
                     return
             
             # 3. imgFlexを探す（小文字で検索）
-            img_flex_start = content_lower.find('<div class="imgflex', box_start)
+            img_flex_start = content.find('<div class="imgflex', box_start)
             if img_flex_start == -1:
                 return
             
             # 4. imgColumn-championを探す
-            img_column_start = content_lower.find('<div class="imgcolumn-champion', img_flex_start)
+            img_column_start = content.find('<div class="imgcolumn-champion', img_flex_start)
             if img_column_start == -1:
                 return
             
             # 5. relative requireTooltipを探す
-            tooltip_start = content_lower.find('<div class="relative requiretooltip', img_column_start)
+            tooltip_start = content.find('<div class="relative requiretooltip', img_column_start)
             if tooltip_start == -1:
                 return
             
             # 6. tooltipの属性を探す
-            tooltip_class_start = content_lower.find('tooltip="', tooltip_start)
+            tooltip_class_start = content.find('tooltip="', tooltip_start)
             if tooltip_class_start == -1:
                 return
             
             # 7. img srcのalt属性を探す
-            alt_start = content_lower.find('alt="', tooltip_class_start)
+            alt_start = content.find('alt="', tooltip_class_start)
             if alt_start == -1:
                 return
             
-            alt_end = content_lower.find('"', alt_start + 5)
+            alt_end = content.find('"', alt_start + 5)
             if alt_end == -1:
                 return
             
-            champion = content_lower[alt_start + 5:alt_end].capitalize()
+            champion = content[alt_start + 5:alt_end].capitalize()
             
             # 現在のマッチ情報を作成
             current_match = {
@@ -405,7 +434,7 @@ def check_player_status(player_name):
             logging.info(f'判定結果: 試合中です（{game_type}）- {champion}')
             return current_match  # マッチ情報を返すのみ
 
-        # 試合中ではない場合の判定
+        # 試合中ではない場合��判定
         not_in_game_patterns = [
             'the summoner is not in-game',
             'summoner-offline',
@@ -413,7 +442,7 @@ def check_player_status(player_name):
             'please retry later',
             'must be on the loading screen'
         ]
-        if any(pattern in content_lower for pattern in not_in_game_patterns):
+        if any(pattern in content for pattern in not_in_game_patterns):
             print('判定結果: プレイヤーは試合中ではありません')
             return None  # 試合中でない場合はNoneを返す
         else:
@@ -425,11 +454,18 @@ def check_player_status(player_name):
                     matches.sort(key=lambda x: x['timestamp'], reverse=True)
                     last_match_info[player_name] = matches[:MAX_MATCHES_PER_PLAYER]
         print('レスポンスステータス:', response.status_code)
-        print('レスポンス内容の一部:', content_lower[:500])
+        print('レスポンス内容の一部:', content[:500])
         print('判定結果: 状態を特定できません')
         
-    except Exception as error:
-        print('エラーが発生しました:', error)
+    except Exception as e:
+        category = PLAYER_CATEGORIES.get(player_name, 'friend')
+        webhook = DiscordWebhook(
+            url=WEBHOOK_URLS[category],
+            content=f"⚠️ **エラー**: `{PLAYER_DICT[player_name]}` (`{player_name}`) の情報取得中にエラーが発生しました。\nプレイヤー名が間違っている可能性があります。確認をお願いします。"
+        )
+        webhook.execute()
+        print(f'エラーが発生しました: {str(e)}')
+        return "error"
 
 def cleanup_old_data():
     """古いデータを定期的に削除（1.5時間以上経過したものを対象）"""
@@ -449,6 +485,13 @@ def cleanup_old_data():
         if removed_count > 0:
             logging.info(f"{player}の古いマッチデータ{removed_count}件を削除しました")
 
+def cleanup_old_notifications():
+    """3時間以上経過した通知履歴を削除"""
+    current_time = datetime.now().timestamp()
+    for player_name in list(not_found_player_notifications.keys()):
+        if current_time - not_found_player_notifications[player_name] >= 10800:
+            del not_found_player_notifications[player_name]
+
 def main():
     logging.info("LoL試合監視を開始します")
     logging.info("監視対象プレイヤー:")
@@ -458,6 +501,7 @@ def main():
     while True:
         try:
             cleanup_old_data()
+            cleanup_old_notifications()  # 通知履歴のクリーンアップを追加
             check_all_players()
             time.sleep(300)
             
