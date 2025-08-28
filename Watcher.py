@@ -18,11 +18,14 @@ load_dotenv()
 
 # Discord Webhook URLs for each category
 WEBHOOK_URLS = {
-    'streamer': os.getenv('DISCORD_WEBHOOK_URL_STREAMER'),
-    'friend': os.getenv('DISCORD_WEBHOOK_URL_FRIEND'),
-    'smurf': os.getenv('DISCORD_WEBHOOK_URL_SMURF'),
-    'troll': os.getenv('DISCORD_WEBHOOK_URL_TROLL')
+    'streamer': os.getenv('DISCORD_WEBHOOK_URL_STREAMER', ''),
+    'friend': os.getenv('DISCORD_WEBHOOK_URL_FRIEND', ''),
+    'smurf': os.getenv('DISCORD_WEBHOOK_URL_SMURF', ''),
+    'troll': os.getenv('DISCORD_WEBHOOK_URL_TROLL', '')
 }
+
+# 有効なWebhook URLを持つカテゴリのみを取得
+ACTIVE_CATEGORIES = {cat: url for cat, url in WEBHOOK_URLS.items() if url}
 
 # 環境変数の読み込み部分
 def load_player_list():
@@ -32,20 +35,26 @@ def load_player_list():
         'smurf': os.getenv('SMURF_LIST', ''),
         'troll': os.getenv('TROLL_LIST', '')
     }
-    
+
     player_dict = {}
     nickname_to_player = {}
     player_categories = {}
-    
+
     for category, player_list_str in categories.items():
-        if not player_list_str:  # 空文字列の場合はスキップ
+        # カテゴリが設定されていない場合はスキップ
+        if not player_list_str:
             continue
-            
+
+        # このカテゴリのWebhook URLが設定されていない場合はスキップ
+        if category not in ACTIVE_CATEGORIES:
+            logging.info(f"カテゴリ '{category}' のWebhook URLが設定されていないため、プレイヤーをスキップします")
+            continue
+
         for player_info in player_list_str.split(','):
             player_info = player_info.strip()
             if not player_info:  # 空の要素はスキップ
                 continue
-                
+
             if ':' in player_info:
                 nickname, name = player_info.split(':')
                 player_dict[name] = nickname
@@ -54,29 +63,26 @@ def load_player_list():
                 # コロンがない場合は、ニックネームなしとして登録
                 name = player_info
                 player_dict[name] = None
-            
+
             player_categories[name] = category
-    
+
     return player_dict, nickname_to_player, player_categories
 
 # グローバル変数として定義
 PLAYER_DICT, NICKNAME_TO_PLAYER, PLAYER_CATEGORIES = load_player_list()
 
 # 環境変数の検証
+if not ACTIVE_CATEGORIES:
+    raise ValueError("少なくとも1つのDiscord Webhook URLが設定されている必要があります。")
+
 if not PLAYER_DICT:
-    raise ValueError("PLAYER_LIST環境変数が設定されていないか、無効な形式です。")
+    raise ValueError("有効なカテゴリに属するプレイヤーが1人も設定されていません。")
 
-if not WEBHOOK_URLS['streamer']:
-    raise ValueError("DISCORD_WEBHOOK_URL_STREAMER環境変数が設定されていません。")
-
-if not WEBHOOK_URLS['friend']:
-    raise ValueError("DISCORD_WEBHOOK_URL_FRIEND環境変数が設定されていません。")
-
-if not WEBHOOK_URLS['smurf']:
-    raise ValueError("DISCORD_WEBHOOK_URL_SMURF環境変数が設定されていません。")
-
-if not WEBHOOK_URLS['troll']:
-    raise ValueError("DISCORD_WEBHOOK_URL_TROLL環境変数が設定されていません。")
+# 設定されたカテゴリごとにプレイヤーがいるかチェック
+for category in ACTIVE_CATEGORIES.keys():
+    category_players = [name for name, cat in PLAYER_CATEGORIES.items() if cat == category]
+    if not category_players:
+        logging.warning(f"カテゴリ '{category}' にプレイヤーが設定されていません。")
 
 print("監視対象プレイヤー:")
 for player_name, nickname in PLAYER_DICT.items():
@@ -228,10 +234,127 @@ class SessionManager:
 # グローバル変数として追加
 not_found_player_notifications = {}  # {player_name: last_notification_time}
 
+def get_player_webhook_url(player_name):
+    """プレイヤーのカテゴリに基づいてWebhook URLを取得"""
+    category = PLAYER_CATEGORIES.get(player_name, 'friend')
+    return WEBHOOK_URLS.get(category, '')
+
+def send_error_notification(player_name, error_message):
+    """エラーノーティフィケーションを送信"""
+    webhook_url = get_player_webhook_url(player_name)
+    if webhook_url:
+        webhook = DiscordWebhook(
+            url=webhook_url,
+            content=f"⚠️ **エラー**: `{PLAYER_DICT[player_name]}` (`{player_name}`) の情報取得中にエラーが発生しました。\n{error_message}"
+        )
+        webhook.execute()
+
+def check_player_not_found(content, player_name):
+    """プレイヤーが存在しないかチェック"""
+    not_found_patterns = [
+        'Summoner not found',
+        'summoner not found',
+        '404 - page not found',
+        'summoner-not-found',
+        'the summoner does not exist'
+    ]
+    return any(pattern in content for pattern in not_found_patterns)
+
+def check_loading_state(content):
+    """ローディング状態をチェック"""
+    loading_patterns = [
+        'damn, that\'s pretty slow to load',
+        'loadmessage',
+        'spinner'
+    ]
+    return any(pattern in content for pattern in loading_patterns)
+
+def check_in_game(content):
+    """試合中かチェック"""
+    in_game_patterns = [
+        'live-game-stats',
+        'team stats',
+        'game-status-ingame',
+        'live game',
+        'spectate'
+    ]
+    return any(pattern in content for pattern in in_game_patterns)
+
+def extract_match_id(content):
+    """コンテンツからマッチIDを抽出"""
+    match_id = None
+    result_td_start = content.find('class="resulttd"')
+    if result_td_start != -1:
+        href_start = content.find('href="https://www.leagueofgraphs.com/match/jp/', result_td_start)
+        if href_start != -1:
+            href_end = content.find('#', href_start)
+            if href_end != -1:
+                start_pos = href_start + len('href="https://www.leagueofgraphs.com/match/jp/')
+                match_id = content[start_pos:href_end]
+    return match_id
+
+def extract_game_type(content):
+    """コンテンツから試合タイプを抽出"""
+    h2_start = content.find('<h2 class="left relative">')
+    if h2_start != -1:
+        h2_end = content.find('</h2>', h2_start)
+        if h2_end != -1:
+            game_type_text = content[h2_start:h2_end].split('\n')[1].strip().lower()
+            type_mapping = {
+                'ranked solo/duo': 'RANKED SOLO/DUO',
+                'ranked flex': 'RANKED FLEX',
+                'normal (quickplay)': 'NORMAL',
+                'aram': 'ARAM',
+                'arena': 'ARENA',
+                'arurf 4v4': 'CUSTOM',
+            }
+            return type_mapping.get(game_type_text, "不明")
+    return "不明"
+
+def extract_champion(content, player_name):
+    """コンテンツからチャンピオン名を抽出"""
+    search_name = player_name.lower()
+    card_start = content.find(f'<div class="card card-5" data-summonername="{search_name}"')
+    if card_start == -1:
+        return "不明"
+
+    box_start = content.find('<div class="box championbox', card_start)
+    if box_start == -1:
+        box_start = content.find('class="championbox', card_start)
+        if box_start == -1:
+            return "不明"
+
+    img_flex_start = content.find('<div class="imgflex', box_start)
+    if img_flex_start == -1:
+        return "不明"
+
+    img_column_start = content.find('<div class="imgcolumn-champion', img_flex_start)
+    if img_column_start == -1:
+        return "不明"
+
+    tooltip_start = content.find('<div class="relative requiretooltip', img_column_start)
+    if tooltip_start == -1:
+        return "不明"
+
+    tooltip_class_start = content.find('tooltip="', tooltip_start)
+    if tooltip_class_start == -1:
+        return "不明"
+
+    alt_start = content.find('alt="', tooltip_class_start)
+    if alt_start == -1:
+        return "不明"
+
+    alt_end = content.find('"', alt_start + 5)
+    if alt_end == -1:
+        return "不明"
+
+    return content[alt_start + 5:alt_end].capitalize()
+
 def check_player_status(player_name):
+    """プレイヤーの試合状態をチェック"""
     url_player_name = player_name.replace('#', '-')
     main_url = f"https://porofessor.gg/live/jp/{url_player_name}"
-    
+
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
@@ -241,37 +364,25 @@ def check_player_status(player_name):
         'Referer': 'https://porofessor.gg/',
         'Cache-Control': 'no-cache'
     }
-    
+
     try:
         logging.info(f"検索URL: {main_url}")
-        
+
         session = SessionManager.get_session()
         response = session.get(main_url, headers=headers, timeout=10)
         if response is None:
-            category = PLAYER_CATEGORIES.get(player_name, 'friend')
-            webhook = DiscordWebhook(
-                url=WEBHOOK_URLS[category],
-                content=f"⚠️ **エラー**: `{PLAYER_DICT[player_name]}` (`{player_name}`) の情報取得中にエラーが発生しました。\nプレイヤー名が間違っている可能性があります。確認をお願いします。"
-            )
-            webhook.execute()
+            send_error_notification(player_name, "レスポンスがNoneです。プレイヤー名が間違っている可能性があります。")
             print(f'エラーが発生しました: レスポンスが None です')
             return "error"
-                
+
         content = response.text.lower()
-        
+
         save_html_log(player_name, content)
-        
+
         display_name = PLAYER_DICT[player_name] if PLAYER_DICT[player_name] else player_name
-        
+
         # プレイヤーが存在しない場合の判定
-        not_found_patterns = [
-            'Summoner not found',
-            'summoner not found',
-            '404 - page not found',
-            'summoner-not-found',
-            'the summoner does not exist'
-        ]
-        if any(pattern in content for pattern in not_found_patterns):
+        if check_player_not_found(content, player_name):
             current_time = datetime.now().timestamp()
             last_notification = not_found_player_notifications.get(player_name, 0)
             
@@ -289,118 +400,37 @@ def check_player_status(player_name):
             print('判定結果: プレイヤーが存在しません')
             return "not_found"
         
-        # 大きなレスポンスデータの参照を削除
+        # 大きなレスポンスデータの参照を削除してメモリ解放
         response = None
+        content = None  # contentも明示的に解放
         
         # ローディング状態の確認
-        loading_patterns = [
-            'damn, that\'s pretty slow to load',
-            'loadmessage',
-            'spinner'
-        ]
-        if any(pattern in content for pattern in loading_patterns):
+        if check_loading_state(content):
             # APIエンドポイントを直接呼び出す
             api_url = f"https://porofessor.gg/partial/live-partial/jp/{url_player_name}"
             api_response = session.get(api_url, headers=headers, timeout=10)
             content = api_response.text
-            
+
             # APIレスポンスのHTMLログも保存
             save_html_log(f"{player_name}_api", content)
-            
-            content = content.lower()
-        
-        # 試合中の判定
-        in_game_patterns = [
-            'live-game-stats',
-            'team stats',
-            'game-status-ingame',
-            'live game',
-            'spectate'
-        ]
-        if any(pattern in content for pattern in in_game_patterns):
-            # マッチIDの取得
-            match_id = None
-            result_td_start = content.find('class="resulttd"')
-            if result_td_start != -1:
-                href_start = content.find('href="https://www.leagueofgraphs.com/match/jp/', result_td_start)
-                if href_start != -1:
-                    href_end = content.find('#', href_start)
-                    if href_end != -1:
-                        start_pos = href_start + len('href="https://www.leagueofgraphs.com/match/jp/')
-                        match_id = content[start_pos:href_end]
 
+            content = content.lower()
+
+        # 試合中の判定
+        if check_in_game(content):
+            # マッチIDの取得
+            match_id = extract_match_id(content)
             if not match_id:
                 logging.warning(f"マッチIDの取得に失敗しました: {player_name}")
                 return
-                
+
             # 試合タイプの判定
-            game_type = "不明"
-            
-            # h2タグの内容を文字列検索で取得
-            h2_start = content.find('<h2 class="left relative">')
-            if h2_start != -1:
-                h2_end = content.find('</h2>', h2_start)
-                if h2_end != -1:
-                    game_type_text = content[h2_start:h2_end].split('\n')[1].strip().lower()
-                    
-                    # 試合タイプのマッピング
-                    type_mapping = {
-                        'ranked solo/duo': 'RANKED SOLO/DUO',
-                        'ranked flex': 'RANKED FLEX',
-                        'normal (quickplay)': 'NORMAL',
-                        'aram': 'ARAM',
-                        'arena': 'ARENA',
-                        'arurf 4v4': 'CUSTOM',
-                    }
-                    
-                    game_type = type_mapping.get(game_type_text, "不明")
+            game_type = extract_game_type(content)
 
             # チャンピオンの判定
-            champion = "不明"
-            search_name = player_name.lower()
-            
-            # 1. プレイヤーのカードを見つける
-            card_start = content.find(f'<div class="card card-5" data-summonername="{search_name}"')
-            if card_start == -1:
+            champion = extract_champion(content, player_name)
+            if champion == "不明":
                 return
-            
-            # 2. box championboxを探す（小文字で検索）
-            box_start = content.find('<div class="box championbox', card_start)
-            if box_start == -1:
-                box_start = content.find('class="championbox', card_start)
-                if box_start == -1:
-                    return
-            
-            # 3. imgFlexを探す（小文字で検索）
-            img_flex_start = content.find('<div class="imgflex', box_start)
-            if img_flex_start == -1:
-                return
-            
-            # 4. imgColumn-championを探す
-            img_column_start = content.find('<div class="imgcolumn-champion', img_flex_start)
-            if img_column_start == -1:
-                return
-            
-            # 5. relative requireTooltipを探す
-            tooltip_start = content.find('<div class="relative requiretooltip', img_column_start)
-            if tooltip_start == -1:
-                return
-            
-            # 6. tooltipの属性を探す
-            tooltip_class_start = content.find('tooltip="', tooltip_start)
-            if tooltip_class_start == -1:
-                return
-            
-            # 7. img srcのalt属性を探す
-            alt_start = content.find('alt="', tooltip_class_start)
-            if alt_start == -1:
-                return
-            
-            alt_end = content.find('"', alt_start + 5)
-            if alt_end == -1:
-                return
-            
-            champion = content[alt_start + 5:alt_end].capitalize()
             
             # 現在のマッチ情報を作成
             current_match = {
@@ -458,12 +488,8 @@ def check_player_status(player_name):
         print('判定結果: 状態を特定できません')
         
     except Exception as e:
-        category = PLAYER_CATEGORIES.get(player_name, 'friend')
-        webhook = DiscordWebhook(
-            url=WEBHOOK_URLS[category],
-            content=f"⚠️ **エラー**: `{PLAYER_DICT[player_name]}` (`{player_name}`) の情報取得中にエラーが発生しました。\nプレイヤー名が間違っている可能性があります。確認をお願いします。"
-        )
-        webhook.execute()
+        error_message = f"プレイヤー名が間違っている可能性があります。確認をお願いします。\nエラー詳細: {str(e)}"
+        send_error_notification(player_name, error_message)
         print(f'エラーが発生しました: {str(e)}')
         return "error"
 
@@ -471,19 +497,41 @@ def cleanup_old_data():
     """古いデータを定期的に削除（1.5時間以上経過したものを対象）"""
     current_time = datetime.now().timestamp()
     cleanup_threshold = 5400  # 1.5時間 = 5400秒
-    
+
+    players_to_remove = []
+
     for player in list(last_match_info.keys()):
         matches = last_match_info[player]
+        original_count = len(matches)
+
         # 1.5時間以上前のデータを削除
-        last_match_info[player] = [
-            match for match in matches 
+        filtered_matches = [
+            match for match in matches
             if current_time - match['timestamp'] < cleanup_threshold
         ]
-        
-        # データが削除された場合はログに記録
-        removed_count = len(matches) - len(last_match_info[player])
-        if removed_count > 0:
-            logging.info(f"{player}の古いマッチデータ{removed_count}件を削除しました")
+
+        if filtered_matches:
+            last_match_info[player] = filtered_matches
+            removed_count = original_count - len(filtered_matches)
+            if removed_count > 0:
+                logging.info(f"{player}の古いマッチデータ{removed_count}件を削除しました")
+        else:
+            # 全てのデータが古い場合はプレイヤーごと削除
+            players_to_remove.append(player)
+            logging.info(f"{player}の全マッチデータを削除しました")
+
+    # 不要なプレイヤーを削除
+    for player in players_to_remove:
+        del last_match_info[player]
+
+    # 明示的なガベージコレクション
+    gc.collect()
+
+    # メモリ使用量のログ出力（デバッグ用）
+    if logging.getLogger().isEnabledFor(logging.DEBUG):
+        import psutil
+        memory_usage = psutil.Process().memory_info().rss / 1024 / 1024  # MB
+        logging.debug(".1f")
 
 def cleanup_old_notifications():
     """3時間以上経過した通知履歴を削除"""
@@ -493,20 +541,49 @@ def cleanup_old_notifications():
             del not_found_player_notifications[player_name]
 
 def main():
-    logging.info("LoL試合監視を開始します")
-    logging.info("監視対象プレイヤー:")
+    """メイン監視ループ"""
+    logging.info("=== LeagueBirdWatcher 起動 ===")
+    logging.info(f"監視対象プレイヤー数: {len(PLAYER_DICT)}")
+    logging.info("有効カテゴリ: " + ", ".join(ACTIVE_CATEGORIES.keys()))
+
     for player_name, nickname in PLAYER_DICT.items():
-        logging.info(f"- {nickname} ({player_name})")
-    
+        category = PLAYER_CATEGORIES.get(player_name, 'friend')
+        logging.info(f"- {nickname or player_name} ({player_name}) [{category}]")
+
+    cycle_count = 0
+
     while True:
         try:
-            cleanup_old_data()
-            cleanup_old_notifications()  # 通知履歴のクリーンアップを追加
+            cycle_count += 1
+            logging.info(f"=== 監視サイクル {cycle_count} 開始 ===")
+
+            # 定期的なデータクリーンアップ（10サイクルごと）
+            if cycle_count % 10 == 0:
+                logging.info("定期クリーンアップを実行します")
+                cleanup_old_data()
+                cleanup_old_notifications()
+            else:
+                # 軽量クリーンアップ
+                cleanup_old_notifications()
+
+            # 全プレイヤーのチェック
             check_all_players()
+
+            # Northflank最適化: メモリ使用量ログ（デバッグ時のみ）
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                try:
+                    import psutil
+                    memory_usage = psutil.Process().memory_info().rss / 1024 / 1024  # MB
+                    logging.debug(".1f")
+                except ImportError:
+                    pass
+
+            logging.info(f"監視サイクル {cycle_count} 完了。次のチェックまで300秒待機します")
             time.sleep(300)
-            
+
         except Exception as e:
             logging.error(f"予期せぬエラーが発生しました: {str(e)}")
+            logging.error(f"エラー詳細: {type(e).__name__}: {e}", exc_info=True)
             time.sleep(300)
             continue
 
